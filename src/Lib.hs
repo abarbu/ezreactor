@@ -1,5 +1,5 @@
 {-# LANGUAGE FlexibleContexts, TypeFamilies, MultiParamTypeClasses, FunctionalDependencies, UndecidableInstances #-}
-{-# LANGUAGE TemplateHaskell, FlexibleInstances, OverloadedStrings, MultiWayIf #-}
+{-# LANGUAGE TemplateHaskell, FlexibleInstances, OverloadedStrings, MultiWayIf, Strict, StrictData #-}
 module Lib where
 import Control.Lens.TH
 import Control.Lens
@@ -25,6 +25,11 @@ import System.Random.MWC
 import qualified Data.Vector.Mutable as MV
 import Text.Printf
 import Brick.Widgets.Dialog
+import Brick.Widgets.ProgressBar
+import System.Random.MWC
+import System.Random.MWC.Distributions
+import qualified Data.Vector.Unboxed.Mutable as UMV
+
 
 data Tick = PhysicsTick
   deriving (Show, Eq)
@@ -34,10 +39,6 @@ data UIResourceName = NoName
 
 data Selectable = SelectableMap Int Int
                 | InFail { failSelection :: Int }
-                -- | SelectableMenuRestart
-                -- | SelectableMenuPause
-                -- | SelectableMenuHelp
-                -- | SelectableMenuQuit
   deriving (Eq, Show)
 
 data ColorMode = ColorHeat
@@ -62,12 +63,44 @@ makeFieldsNoPrefix ''GameState
 
 physicsDt = 0.1 -- seconds
 
+randomizePhysics p rng = do
+  let fn m mu sigma = realToFrac . max m <$> normal mu sigma rng
+  tr  <- fn 0.01  0.2  0.1
+  fri <- fn 0.1   0.4  0.1
+  cri <- fn 0.5   3    1
+  sng <- fn 0.1   0.5  0.1
+  fng <- fn 0.001 0.02 0.1
+  ncr <- fn 0.5   2    0.5
+  nv  <- fn 0.5   1    1
+  eff <- fn 3     8    3
+  efa <- fn 2     5    2
+  cha <- fn 5     70   20
+  hd  <- fn 10    1000 100
+  cmt <- fn 10000 100000 10000
+  ol  <- fn 0.8   0.95 0.05
+  pure $ p & thermalResistanceRate .~ PerSecond tr
+           & fuelRodInteractionRate .~ PerSecond fri
+           & controlRodInteractionRate .~ PerSecond cri
+           & sourceNeutronGenerationRate .~ PerSecond sng
+           & fuelNeutronGenerationRate .~ PerSecond fng
+           & neutronCaptureRate .~ PerSecond ncr
+           & neutronVelocity .~ PerSecond nv
+           & energyFromFission .~ eff
+           & energyFromAbsorption .~ efa
+           & coolantHeatAbsorptionRate .~ PerSecond cha
+           & coolantHeatDissipationRate .~ PerSecond hd
+           & coolantMaxTemperature .~ cmt
+           & outsideLosses .~ PerSecond ol
+
 newState w h = do
   r <- mkReactor w h
   rng <- createSystemRandom
-  pure $ GameState r mkPhysics rng
+  p <- randomizePhysics mkPhysics rng
+  maxTemp <- round . max 1000 <$> normal 4000 1000 rng
+  targetTemp <- round . max 1000 <$> normal 300000 200000 rng
+  pure $ GameState r p rng
                      (SelectableMap (w `div` 2) (h `div` 2))
-                     Nothing False False ColorHeat 3000 4000 0.10 0 10
+                     Nothing False False ColorNeutronFlux maxTemp targetTemp 0.10 0 10
 
 ui :: IO ()
 ui = do
@@ -75,12 +108,12 @@ ui = do
   void . forkIO $ forever $ do
     writeBChan chan PhysicsTick
     threadDelay (round $ physicsDt * fromIntegral 1000000) -- microseconds
-  let w = 41
+  let w = 61
   let h = 21
   initialState <- newState w h
   vty <- mkVty defaultConfig
   endState <- customMain vty (mkVty defaultConfig) (Just chan) app initialState
-  print "Stay radioactive!"
+  putStrLn "Stay radioactive!"
 
 mapPallete = [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 13, 12, 19, 18, 25, 24, 31, 30, 67, 66, 171, 170, 169, 168, 164, 163, 162, 157, 156, 151, 150, 146, 145, 144]
 
@@ -90,12 +123,15 @@ app = App { appDraw = drawUI
           , appHandleEvent  = eventHandler
           , appStartEvent = pure
           , appAttrMap = const $ attrMap mempty ([("selectedButton", bg red)
-                                                 ,("selectedMap", bg red)
+                                                 ,("selectedMap", red `on` black)
+                                                 ,("selectedMapInverse", white `on` red)
                                                  ,("unSelectedMap", bg black)
                                                  ,("black", bg black)
                                                  ,("highlight", fg brightWhite)
                                                  ,("normal", fg white)
                                                  ,("default.bg", bg black)
+                                                 ,(progressCompleteAttr, white `on` (Color240 36))
+                                                 ,(progressIncompleteAttr, white `on` black)
                                                  ,(buttonAttr, white `on` black)
                                                  ,(buttonSelectedAttr, red `on` white)
                                                  ,(dialogAttr, brightWhite `on` red)]
@@ -120,12 +156,12 @@ button s name label = withAttr "black"
                                     id) $ str label
 
 colorNeutronFlux s x_ y_ =
-  min (round $ unsafePerformIO (xyreadMV' x_ y_ (s^.reactor.reactorNeutronFluxMap) (s^.reactor.reactorWidth))) (length mapPallete - 1)
+  min (ceiling $ sqrt $ unsafePerformIO (xyreadUMV' x_ y_ (s^.reactor.reactorNeutronFluxMap) (s^.reactor.reactorWidth))) (length mapPallete - 1)
 
 toDegrees temp = round $ temp / 100
 
 colorHeat s x_ y_ =
-  min (round (unsafePerformIO (xyreadMV' x_ y_ (s^.reactor.reactorHeatMap) (s^.reactor.reactorWidth)) / 150)) (length mapPallete - 1)
+  min (round (unsafePerformIO (xyreadUMV' x_ y_ (s^.reactor.reactorHeatMap) (s^.reactor.reactorWidth)) / 5000)) (length mapPallete - 1)
 
 topStat label text = border $ padLeftRight 1 (padRight (Pad 1) (str label) <+> padLeft (Pad (8 - ltext)) (str text))
   where ltext = length text
@@ -139,18 +175,25 @@ drawUI s =
                        (Just "   MELTDOWN .. Your reactor is a dusty crater. NO REFUNDS   ")
                        (Just (failSelection $ s^.selected, [("Restart", 0), ("Quit", 1)]))
                        80)
-          (hCenter $ padTopBottom 6 $ vBox [str "You lost :("
+          (hCenter $ padTopBottom 6 $ vBox [str "The reactor got away from you :("
                                            ,str "You did manage to score!"
-                                           ,str "Poorly.."
-                                           ,str ((show $ s^.points) ++ " points")])]
+                                           ,str "That's more than we can say about your victims."
+                                           ,padTopBottom 4 $ str ((show $ s^.points) ++ " points")])]
       SelectableMap _ _ ->
-        [vBox [ border
+        [if s^.isPaused then
+           renderDialog (dialog
+                          (Just "Paused - Press space to unpause")
+                          Nothing
+                          40)
+           (hCenter $ padTopBottom 1 $ str "Will you save the day?") else
+           str ""
+        ,vBox [ border
            $ hCenter
            $ str "EzReactor Management Console --- Money back guarantee on every reactor explosion!"
          , hCenter $ hBox [ padTopBottom 1 $ str "Get points by staying close to the target temperature! "
                           , withAttr "highlight" $ border $ padLeftRight 1 $ str $ printf "%10.2f points" $ s^.points ]
          , hCenter $ hBox [ padTopBottom 1 $ str "Target power levels are "
-                          , withAttr "highlight" $ border $ padLeftRight 1 $ str $ printf "%6d" $ s^.targetPower
+                          , withAttr "highlight" $ border $ padLeftRight 1 $ str $ printf "%10d" $ s^.targetPower
                           , padTopBottom 1 $ str " current total heat is "
                           , border $ padLeftRight 1 $ str $ printf "%6d" $ (\x -> x::Int) $ toDegrees totalTemp
                           ]
@@ -165,9 +208,16 @@ drawUI s =
          , hCenter
            $ hBox [-- topStat "Coolant temperature: " (show $ round $ unsafePerformIO $ readIORef $ s^.reactor.coolantTemperature)
                   --
-                  topStat "Max core temperature: " $ show $ round (maxTemp / 10)
+                  topStat "Max. core temperature: " $ show $ toDegrees maxTemp
                   --
-                  ,topStat "Neutrons: " (show $ S.length $ s^.reactor.reactorNeutrons)
+                  ,withAttr "black"
+                   $ border
+                   $ padLeftRight 1
+                   $ hLimit 50
+                   $ progressBar (Just $ "Meltdown at " ++ show (s^.meltdownTemp))
+                                 (fromIntegral (toDegrees maxTemp)/(fromIntegral $ s^.meltdownTemp))
+                  --
+                  ,topStat "Neutron flux in core: " (show $ S.length $ s^.reactor.reactorNeutrons)
                   ]
          , withAttr "black"
            $ hCenter
@@ -179,29 +229,41 @@ drawUI s =
            $ vBox $ map hBox $ unsafePerformIO
            $ xyeachByRow (\x y e ->
                              pure $ (case s^.selected of
-                                        SelectableMap x' y' | x' == x && y' == y -> withAttr "selectedMap"
+                                        SelectableMap x' y' | x' == x && y' == y -> case e of
+                                                                                    LoweredControlRod -> forceAttr "selectedMap"
+                                                                                    otherwise -> forceAttr "selectedMapInverse"
                                                             | otherwise         -> withAttr (attrName $ "mapPallete" <> show (colorMapFn s x y)))
                              $ str
                              $ elementToMapChar e) (s^.reactor.reactorLayout) (s^.reactor.reactorWidth)
-         , hBox 
+         , hCenter $ hBox 
                 [
            borderWithLabel (str "Instructions")
            $ padTopBottom 1
-           $ vBox [str "The reactor starts empty"
-                  ,str "Add elements"
-                  ,str "Add cooling!!"
-                  ,str "Keep temperatures low"
-                  ,str "Make some electricity"]
+           $ padLeftRight 1
+           $ vBox [str "The reactor starts empty; spread out!"
+                  ,str "Add elements and try to reach the target temperatures"
+                  ,str "Power output is the total heat of your reactor"
+                  ,str "Sources put out neutrons that can hit fuel rods"
+                  ,str "Fuel rods sometimes fission when hit by neutrons"
+                  ,str "Fission can release 2 or 3 neutrons and heat!"
+                  ,str "Fuel rods also spontaneously generate neutrons"
+                  ,str "Cooling elements prevent hotspots and meltdowns"
+                  ,str "Lowered control rods absorb neutrons, raised ones don't"
+                  ,str "'m' toggles between the heat and neutron maps"
+                  ]
          , borderWithLabel (str "Reactor elements & keys")
            $ padTopBottom 1
            $ padLeftRight 1
-           $ vBox $ map drawMapHelp [ (NeutronSource , "Neutron source", "s")
-                                    , (RaisedControlRod, "Control rod (Raised)", "R")
-                                    , (LoweredControlRod, "Control rod (lowered)", "r")
-                                    , (FuelRod, "Fuel Rod", "f")
-                                    , (Coolant, "Coolant", "c")
-                                    , (Spacer, "Spacer", ".")]
+           $ vBox (map drawMapHelp [ (NeutronSource , "Neutron source", "s")
+                                   , (RaisedControlRod, "Control rod (Raised)", "R")
+                                   , (LoweredControlRod, "Control rod (lowered)", "r")
+                                   , (FuelRod, "Fuel Rod", "f")
+                                   , (Coolant, "Coolant", "c")
+                                   , (Spacer, "Spacer", ".")]
+                    ++ [padTop (Pad 2) $ str "All reactors are different"
+                      ,str "The physics changes each time!"])
          , borderWithLabel (str "Keys")
+           $ hLimit 30
            $ padTopBottom 1
            $ padLeftRight 1
            $ vBox $ map drawKeyHelp [ ("Left", "←")
@@ -209,7 +271,7 @@ drawUI s =
                                     , ("Down", "↓")
                                     , ("Up", "↑")
                                     , ("Pause", "space")
-                                    , ("Restart", "r")
+                                    , ("New game", "n")
                                     , ("Lower control rods", "x")
                                     , ("Raise control rods", "z")
                                     , ("Switch Neutron/Heat map", "m")
@@ -232,13 +294,13 @@ drawKeyHelp (label, key) = padRight Max (str label) <+> padLeft Max (str key)
 tempStats s = do
   a <- newIORef 0
   m <- newIORef 0
-  xyeachMV (\_ _ e -> do
+  xyeachUMV (\_ _ e -> do
                modifyIORef a (+ e)
                modifyIORef m (max e))
     (s^.reactor.reactorHeatMap) (s^.reactor.reactorWidth)
   a' <- readIORef a
   m' <- readIORef m
-  pure (a' / fromIntegral (MV.length (s^.reactor^.reactorHeatMap)), m', a')
+  pure (a' / fromIntegral (UMV.length (s^.reactor^.reactorHeatMap)), m', a')
 
 inFail (InFail _) = True
 inFail _ = False
@@ -253,8 +315,9 @@ eventHandler s e = do
       (avgTemp, maxTemp, totalTemp) <- liftIO $ tempStats s
       continue $ s & reactor .~ r
                    & physics .~ p
-                   & isPaused .~ (round maxTemp > s^.meltdownTemp)
-                   & selected %~ (\sel -> if not (inFail $ s^.selected) && round maxTemp > s^.meltdownTemp then
+                   -- & targetPower .~ 
+                   & isPaused %~ (|| (fromIntegral (toDegrees maxTemp) > s^.meltdownTemp))
+                   & selected %~ (\sel -> if not (inFail $ s^.selected) && fromIntegral (toDegrees maxTemp) > s^.meltdownTemp then
                                            InFail 0 else
                                            sel)
                    & points +~ physicsDt * (let tol = 100 + (fromIntegral (s^.targetPower) / 2)
@@ -277,6 +340,9 @@ eventHandler s e = do
                                                                           LoweredControlRod
                                                      _ -> pure ()) (s^.reactor.reactorLayout) (s^.reactor.reactorWidth))
                                >> continue s
+        EvKey (KChar 'n') [] -> do
+          s' <- liftIO $ newState (s^.reactor.reactorWidth) (reactorHeight $ s^.reactor)
+          continue s'
         EvKey (KChar 's') [] ->
           case s^.selected of
             SelectableMap x y -> liftIO (setElement (s^.reactor) x y NeutronSource) >> continue s
@@ -337,5 +403,5 @@ eventHandler s e = do
               s' <- liftIO $ newState (s^.reactor.reactorWidth) (reactorHeight $ s^.reactor)
               continue s'
             InFail 1 -> halt s
-        _ -> liftIO (print e) >> continue s
-    _ -> liftIO (print e) >> continue s
+        _ -> continue s
+    _ -> continue s

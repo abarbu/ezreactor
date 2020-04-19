@@ -1,12 +1,12 @@
 {-# LANGUAGE FlexibleContexts, TypeFamilies, MultiParamTypeClasses, FunctionalDependencies #-}
-{-# LANGUAGE TemplateHaskell, FlexibleInstances #-}
+{-# LANGUAGE TemplateHaskell, FlexibleInstances, Strict, StrictData #-}
 module Reactor where
 import qualified Data.Vector as V
 import Data.Vector(Vector)
 import qualified Data.Vector.Unboxed as VU
 import Data.Vector.Mutable(IOVector)
 import qualified Data.Vector.Mutable as MV
-import qualified Data.Vector.Unboxed.Mutable as VUM
+import qualified Data.Vector.Unboxed.Mutable as UMV
 import qualified Data.Sequence as S
 import Data.Sequence(Seq)
 import Data.IORef
@@ -21,7 +21,7 @@ data Element = NeutronSource
              | FuelRod
              | Coolant
              | Spacer
-  deriving (Show)
+  deriving (Show, Eq)
 makePrisms ''Element
 
 -- These values are per second not per physics step!
@@ -42,9 +42,9 @@ makeFieldsNoPrefix ''Neutron
 data Reactor =
   Reactor { _reactorWidth :: Int
           , _reactorLayout :: IOVector Element
-          , _reactorHeatMap :: IOVector Float
+          , _reactorHeatMap :: UMV.IOVector Float
           , _reactorNeutrons :: Seq (IORef Neutron)
-          , _reactorNeutronFluxMap :: IOVector Float
+          , _reactorNeutronFluxMap :: UMV.IOVector Float
           , _coolantTemperature :: IORef Float
           }
 makeFieldsNoPrefix ''Reactor
@@ -56,7 +56,7 @@ instance Show Reactor where
     "--- Reactor ---\n"
     ++ "width=" ++ show (r^.reactorWidth) ++ "\n"
     ++ "layout=" ++ show (unsafePerformIO $ V.freeze $ r^.reactorLayout) ++ "\n"
-    ++ "heatMap=" ++ show (unsafePerformIO $ V.freeze $ r^.reactorHeatMap) ++ "\n"
+    ++ "heatMap=" ++ show (unsafePerformIO $ VU.freeze $ r^.reactorHeatMap) ++ "\n"
     ++ "neutrons=" ++ show (unsafePerformIO $ mapM readIORef $ r^.reactorNeutrons) ++ "\n"
     ++ "temperature=" ++ show (unsafePerformIO $ readIORef $ r^.coolantTemperature) ++ "\n"
 
@@ -76,15 +76,17 @@ data Physics =
             --
           , _coolantHeatAbsorptionRate :: PerSecond
           , _coolantHeatDissipationRate :: PerSecond
-          , _coolantMaxTemperature :: Float }
+          , _coolantMaxTemperature :: Float
+          --
+          , _outsideLosses :: PerSecond }
   deriving (Show, Eq)
 makeFieldsNoPrefix ''Physics
 
 mkReactor :: Int -> Int -> IO Reactor
 mkReactor w h = do
   layout <- MV.replicate (w*h) Spacer
-  heatMap <- MV.replicate (w*h) 0
-  neutronFluxMap <- MV.replicate (w*h) 0
+  heatMap <- UMV.replicate (w*h) 0
+  neutronFluxMap <- UMV.replicate (w*h) 0
   coolantTemperature <- newIORef 0
   pure $ Reactor { _reactorWidth = w
                  , _reactorLayout = layout
@@ -95,7 +97,7 @@ mkReactor w h = do
                  }
 
 mkPhysics :: Physics
-mkPhysics = Physics { _thermalResistanceRate = PerSecond 2
+mkPhysics = Physics { _thermalResistanceRate = PerSecond 0.2
                                                 --
                     , _fuelRodInteractionRate = PerSecond 0.4
                     , _controlRodInteractionRate = PerSecond 3
@@ -111,6 +113,8 @@ mkPhysics = Physics { _thermalResistanceRate = PerSecond 2
                     , _coolantHeatAbsorptionRate = PerSecond 70
                     , _coolantHeatDissipationRate = PerSecond 1000
                     , _coolantMaxTemperature = 100000
+                    --
+                    , _outsideLosses = PerSecond 0.95
                     }
 
 xymap :: (Int -> Int -> a -> b) -> Vector a -> Int -> Vector b
@@ -134,31 +138,39 @@ xyseq f v w = loop 0 0
                      ss <- loop (x + 1) y
                      pure $ s S.>< ss
 
---   1
---  111
--- 11511
---  111
---   1
-
--- At the boundary we want to keep the heat as is, so repeat the center
--- value. All kernels must have sum 1.
-
 xyreadMV :: Int -> Int -> a -> IOVector a -> Int -> IO a
 xyreadMV x y def v w | inBoundsMV x y v w = MV.read v (y*w+x)
                      | otherwise = pure def
 
+xyreadUMV :: UMV.Unbox a => Int -> Int -> a -> UMV.IOVector a -> Int -> IO a
+xyreadUMV x y def v w | inBoundsUMV x y v w = UMV.read v (y*w+x)
+                      | otherwise = pure def
+
 xyreadMV' :: Int -> Int -> IOVector a -> Int -> IO a
 xyreadMV' x y v w = MV.read v (y*w+x)
+
+xyreadUMV' :: UMV.Unbox a => Int -> Int -> UMV.IOVector a -> Int -> IO a
+xyreadUMV' x y v w = UMV.read v (y*w+x)
 
 inBoundsMV x y v w | x < 0 || x >= w ||
                      y < 0 || y*w >= MV.length v = False
                    | otherwise = True
 
+inBoundsUMV x y v w | x < 0 || x >= w ||
+                      y < 0 || y*w >= UMV.length v = False
+                    | otherwise = True
+
 xysetMV :: Int -> Int -> IOVector a -> Int -> a -> IO ()
 xysetMV x y v w e = MV.write v (y*w+x) e
 
+xysetUMV :: UMV.Unbox a => Int -> Int -> UMV.IOVector a -> Int -> a -> IO ()
+xysetUMV x y v w e = UMV.write v (y*w+x) e
+
 xymodifyMV :: Int -> Int -> IOVector a -> Int -> (a -> a) -> IO ()
 xymodifyMV x y v w f = MV.modify v f (y*w+x)
+
+xymodifyUMV :: UMV.Unbox a => Int -> Int -> UMV.IOVector a -> Int -> (a -> a) -> IO ()
+xymodifyUMV x y v w f = UMV.modify v f (y*w+x)
 
 xyeachMV :: (Int -> Int -> a -> IO ()) -> IOVector a -> Int -> IO ()
 xyeachMV f v w = loop 0 0
@@ -168,13 +180,21 @@ xyeachMV f v w = loop 0 0
                  | otherwise = xyreadMV' x y v w >>= f x y
                              >> loop (x + 1) y
 
+xyeachUMV :: UMV.Unbox a => (Int -> Int -> a -> IO ()) -> UMV.IOVector a -> Int -> IO ()
+xyeachUMV f v w = loop 0 0
+  where h = UMV.length v `div` w
+        loop x y | x == w = loop 0 (y + 1)
+                 | y == h = pure ()
+                 | otherwise = xyreadUMV' x y v w >>= f x y
+                             >> loop (x + 1) y
+
 xyeachByRow :: (Int -> Int -> a -> IO b) -> IOVector a -> Int -> IO [[b]]
 xyeachByRow f v w = loop 0 0 [] []
   where h = MV.length v `div` w
         loop x y lrow l | x == w = loop 0 (y + 1) [] (reverse lrow:l)
                         | y == h = pure $ reverse l
                         | otherwise = do
-                            e <- xyreadMV x y undefined v w >>= f x y
+                            e <- xyreadMV' x y v w >>= f x y
                             loop (x + 1) y (e:lrow) l
 
 setElement r x y e = xysetMV x y (r^.reactorLayout) (r^.reactorWidth) e
@@ -182,14 +202,16 @@ setElement r x y e = xysetMV x y (r^.reactorLayout) (r^.reactorWidth) e
 --     1
 -- 1   C   1
 --     1
-conv2d :: Float -> IOVector Float -> Int -> IO ()
-conv2d resistance v w =
-  xyeachMV (\x y e -> do
-             s1 <- xyreadMV (x - 1) y e v w
-             s2 <- xyreadMV (x + 1) y e v w
-             s3 <- xyreadMV x (y - 1) e v w
-             s4 <- xyreadMV x (y + 1) e v w
-             xysetMV x y v w (e*center + side*s1 + side*s2 + side*s3 + side*s4))
+conv2d :: Float -> Float -> UMV.IOVector Float -> Int -> IO ()
+conv2d resistance insulationPercent v w =
+  xyeachUMV (\x y e -> do
+             let eBorder = e*insulationPercent
+               -- If insulationPercent is 1 there are no outside losses
+             s1 <- xyreadUMV (x - 1) y eBorder v w
+             s2 <- xyreadUMV (x + 1) y eBorder v w
+             s3 <- xyreadUMV x (y - 1) eBorder v w
+             s4 <- xyreadUMV x (y + 1) eBorder v w
+             xysetUMV x y v w (e*center + side*s1 + side*s2 + side*s3 + side*s4))
          v w
   where center = 1-(4*side)
         side = 1/(resistance+4)
@@ -238,12 +260,14 @@ data NeutronOutcomes =
 makeFieldsNoPrefix ''NeutronOutcomes
 
 mapSeqNOutcomeM :: (a -> IO NeutronOutcomes) -> Seq a -> IO NeutronOutcomes
-mapSeqNOutcomeM f s = do
-  ns <- mapM f s
-  pure $ NeutronOutcomes (foldl (S.><) S.empty $ fmap (^.remaining) ns)
-                         (foldl (S.><) S.empty $ fmap (^.produced) ns)
-                         (foldl (S.><) S.empty $ fmap (^.absorbed) ns)
-                         (foldl (S.><) S.empty $ fmap (^.gone) ns)
+mapSeqNOutcomeM f ss = loop f ss (NeutronOutcomes S.empty S.empty S.empty S.empty)
+  where loop f S.Empty os = pure os
+        loop f (s S.:<| ss) (NeutronOutcomes r p a g) = do
+          n <- f s
+          loop f ss (NeutronOutcomes (n^.remaining S.>< r)
+                                     (n^.produced S.>< p)
+                                     (n^.absorbed S.>< a)
+                                     (n^.gone S.>< g))
 
 interactNeutron :: GenIO -> Float -> Float -> PerSecond -> IOVector Element -> Int
                 -> IORef Neutron
@@ -286,7 +310,7 @@ interactNeutron gen fuelRodRate controlRodRate velocity layout w n_ = do
 
 generateHeat energy v w n = do
   n_ <- readIORef n
-  xymodifyMV (round $ n_^.x) (round $ n_^.y) v w (+ energy)
+  xymodifyUMV (round $ n_^.x) (round $ n_^.y) v w (+ energy)
 
 physicsStep :: GenIO -> Reactor -> Physics -> Float -> IO (Reactor, Physics)
 physicsStep gen r p dt = {-# SCC "physics" #-} do
@@ -297,6 +321,7 @@ physicsStep gen r p dt = {-# SCC "physics" #-} do
   let controlRodInteractionRate_   = perTick (p ^. controlRodInteractionRate) dt
   let coolantHeatAbsorptionRate_   = perTick (p ^. coolantHeatAbsorptionRate) dt
   let coolantHeatDissipationRate_  = perTick (p ^. coolantHeatDissipationRate) dt
+  let outsideLosses_               = perTick (p ^. outsideLosses) dt
   let reactorLayout_          = r ^. reactorLayout
   let reactorWidth_           = r ^. reactorWidth
   let neutronVelocity_        = p ^. neutronVelocity
@@ -306,7 +331,7 @@ physicsStep gen r p dt = {-# SCC "physics" #-} do
   let coolantTemperature_     = r ^. coolantTemperature
   let reactorNeutronFluxMap_  = r ^. reactorNeutronFluxMap
   -- diffuse heat
-  conv2d 10 reactorHeatMap_ reactorWidth_
+  conv2d 10 (1 - outsideLosses_) reactorHeatMap_ reactorWidth_
   -- generate neutrons
   newNeutrons <- xyseq (\x y e ->
                          case e of
@@ -352,17 +377,17 @@ physicsStep gen r p dt = {-# SCC "physics" #-} do
                  LoweredControlRod -> pure ()
                  Spacer -> pure ()
                  Coolant -> do
-                   temperature <- xyreadMV'  x y reactorHeatMap_ reactorWidth_
+                   temperature <- xyreadUMV'  x y reactorHeatMap_ reactorWidth_
                    let temperature' = max 0 $ temperature - coolantHeatAbsorptionRate_
                    modifyIORef coolantTemperature_ (+ (temperature - temperature'))
-                   xysetMV x y reactorHeatMap_ reactorWidth_ temperature')
+                   xysetUMV x y reactorHeatMap_ reactorWidth_ temperature')
     reactorLayout_ reactorWidth_
   -- cool the coolant
   modifyIORef coolantTemperature_ (\x -> max 0 (x - coolantHeatDissipationRate_))
   -- recomputing the flux map is done purely for display purposes
-  MV.set (r^.reactorNeutronFluxMap) 0
+  UMV.set (r^.reactorNeutronFluxMap) 0
   let remainingNeutrons = neutronOutcomes ^. remaining S.>< neutronOutcomes ^. produced
   mapM_ (\n -> do
             n_ <- readIORef n
-            xymodifyMV (round $ n_^.x) (round $ n_^.y) reactorNeutronFluxMap_ reactorWidth_ (+1)) remainingNeutrons
+            xymodifyUMV (round $ n_^.x) (round $ n_^.y) reactorNeutronFluxMap_ reactorWidth_ (+1)) remainingNeutrons
   pure (r & reactorNeutrons .~ remainingNeutrons, p)
