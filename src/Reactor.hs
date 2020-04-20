@@ -97,7 +97,7 @@ mkReactor w h = do
                  }
 
 mkPhysics :: Physics
-mkPhysics = Physics { _thermalResistanceRate = PerSecond 0.2
+mkPhysics = Physics { _thermalResistanceRate = PerSecond 3
                                                 --
                     , _fuelRodInteractionRate = PerSecond 0.4
                     , _controlRodInteractionRate = PerSecond 3
@@ -331,7 +331,7 @@ physicsStep gen r p dt = {-# SCC "physics" #-} do
   let coolantTemperature_     = r ^. coolantTemperature
   let reactorNeutronFluxMap_  = r ^. reactorNeutronFluxMap
   -- diffuse heat
-  conv2d 10 (1 - outsideLosses_) reactorHeatMap_ reactorWidth_
+  conv2d (thermalResistanceRate_) (1 - outsideLosses_) reactorHeatMap_ reactorWidth_
   -- generate neutrons
   newNeutrons <- xyseq (\x y e ->
                          case e of

@@ -65,7 +65,7 @@ physicsDt = 0.1 -- seconds
 
 randomizePhysics p rng = do
   let fn m mu sigma = realToFrac . max m <$> normal mu sigma rng
-  tr  <- fn 0.01  0.2  0.1
+  tr  <- fn 0.2   5    1
   fri <- fn 0.1   0.4  0.1
   cri <- fn 0.5   3    1
   sng <- fn 0.1   0.5  0.1
