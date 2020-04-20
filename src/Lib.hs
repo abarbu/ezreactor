@@ -126,9 +126,9 @@ app = App { appDraw = drawUI
                                                  ,("selectedMap", red `on` black)
                                                  ,("selectedMapInverse", white `on` red)
                                                  ,("unSelectedMap", bg black)
-                                                 ,("black", bg black)
-                                                 ,("highlight", fg brightWhite)
-                                                 ,("normal", fg white)
+                                                 ,("black", white `on` black)
+                                                 ,("highlight", brightWhite `on` black)
+                                                 ,("normal", white `on` black)
                                                  ,("default.bg", bg black)
                                                  ,(progressCompleteAttr, white `on` (Color240 36))
                                                  ,(progressIncompleteAttr, white `on` black)
@@ -171,7 +171,8 @@ drawUI s =
   map (withBorderStyle unicodeRounded)
   $ case s^.selected of
       InFail n ->
-        [renderDialog (dialog
+        [withAttr "black"
+          $ renderDialog (dialog
                        (Just "   MELTDOWN .. Your reactor is a dusty crater. NO REFUNDS   ")
                        (Just (failSelection $ s^.selected, [("Restart", 0), ("Quit", 1)]))
                        80)
@@ -187,7 +188,8 @@ drawUI s =
                           40)
            (hCenter $ padTopBottom 1 $ str "Will you save the day?") else
            str ""
-        ,vBox [ border
+        ,withAttr "black"
+          $ vBox [ border
            $ hCenter
            $ str "EzReactor Management Console --- Money back guarantee on every reactor explosion!"
          , hCenter $ hBox [ padTopBottom 1 $ str "Get points by staying close to the target temperature! "
@@ -205,7 +207,8 @@ drawUI s =
                        | s^.targetPower > 200 && toDegrees totalTemp > (round $ targetPower'*2)   -> str "Decrease power"
                        | s^.targetPower > 200 && toDegrees totalTemp > (round $ targetPower'*1.3)   -> str "Slightly less power"
                        | otherwise -> str "Close to nominal conditions")
-         , hCenter
+         , withAttr "black"
+           $ hCenter
            $ hBox [-- topStat "Coolant temperature: " (show $ round $ unsafePerformIO $ readIORef $ s^.reactor.coolantTemperature)
                   --
                   topStat "Max. core temperature: " $ show $ toDegrees maxTemp
@@ -217,7 +220,8 @@ drawUI s =
                    $ progressBar (Just $ "Meltdown at " ++ show (s^.meltdownTemp))
                                  (fromIntegral (toDegrees maxTemp)/(fromIntegral $ s^.meltdownTemp))
                   --
-                  ,topStat "Neutron flux in core: " (show $ S.length $ s^.reactor.reactorNeutrons)
+                  ,withAttr "black"
+                   $ topStat "Neutron flux in core: " (show $ S.length $ s^.reactor.reactorNeutrons)
                   ]
          , withAttr "black"
            $ hCenter
@@ -226,6 +230,7 @@ drawUI s =
                                                                  ColorNeutronFlux -> "neutrons") ++ ")")
            $ padTopBottom 1
            $ padLeftRight 1
+           $ withAttr "black"
            $ vBox $ map hBox $ unsafePerformIO
            $ xyeachByRow (\x y e ->
                              pure $ (case s^.selected of
