@@ -241,7 +241,7 @@ drawUI s =
            $ padTopBottom 1
            $ padLeftRight 1
            $ vBox [str "The reactor starts empty; spread out!"
-                  ,str "Add elements and try to reach the target temperatures"
+                  ,str "Add elements to reach the changing target temperatures"
                   ,str "Power output is the total heat of your reactor"
                   ,str "Sources put out neutrons that can hit fuel rods"
                   ,str "Fuel rods sometimes fission when hit by neutrons"
@@ -312,10 +312,14 @@ eventHandler s e = do
       (r,p) <- liftIO $ if s^.isPaused then
                           pure (s^.reactor, s^.physics) else
                           physicsStep (s^.rng) (s^.reactor) (s^.physics) physicsDt
+      resetPowerP <- liftIO $ uniform (s^.rng)
+      targetPower' <- if (resetPowerP :: Float) < 0.00001 then
+                       liftIO $ (round . max 1000 <$> normal 300000 200000 (s^.rng))else
+                       liftIO $ (round . max 0 <$> normal (realToFrac $ s^.targetPower) (realToFrac $ physicsDt * 1000) (s^.rng))
       (avgTemp, maxTemp, totalTemp) <- liftIO $ tempStats s
       continue $ s & reactor .~ r
                    & physics .~ p
-                   -- & targetPower .~ 
+                   & targetPower %~ (if s^.isPaused then id else const targetPower')
                    & isPaused %~ (|| (fromIntegral (toDegrees maxTemp) > s^.meltdownTemp))
                    & selected %~ (\sel -> if not (inFail $ s^.selected) && fromIntegral (toDegrees maxTemp) > s^.meltdownTemp then
                                            InFail 0 else
