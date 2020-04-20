@@ -132,6 +132,7 @@ app = App { appDraw = drawUI
                                                  ,("default.bg", bg black)
                                                  ,(progressCompleteAttr, white `on` (Color240 36))
                                                  ,(progressIncompleteAttr, white `on` black)
+                                                 ,(borderAttr, white `on` black)
                                                  ,(buttonAttr, white `on` black)
                                                  ,(buttonSelectedAttr, red `on` white)
                                                  ,(dialogAttr, brightWhite `on` red)]
