@@ -137,7 +137,7 @@ app = App { appDraw = drawUI
                                                  ,(buttonSelectedAttr, red `on` white)
                                                  ,(dialogAttr, brightWhite `on` red)]
                                                  ++ zipWith (\c i -> (attrName $ "mapPallete" <> show i
-                                                                   ,bg (Color240 $ fromIntegral $ mapPallete !! i)))
+                                                                   ,white `on` (Color240 $ fromIntegral $ mapPallete !! i)))
                                                     mapPallete [0..])
           }
 
